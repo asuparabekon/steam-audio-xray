@@ -37,7 +37,12 @@ PathSimulator::PathSimulator(const ProbeBatch& probes,
                              const Vector3f& down)
     : mVisTester(numSamples, asymmetricVisRange, down)
     , mPathFinder(probes, 1)
-{}
+{
+    mProbePath.nodes.reserve(16);
+    mRoutePoints.reserve(18);
+    for (auto& path : mResolvedPaths)
+        path.bends.reserve(16);
+}
 
 bool PathSimulator::isPathOccluded(const SoundPath& path,
                                    const IScene& scene,
@@ -48,7 +53,8 @@ bool PathSimulator::isPathOccluded(const SoundPath& path,
                                    int end,
                                    bool enableValidation,
                                    ValidationRayVisualizationCallback validationRayVisualization,
-                                   void* userData) const
+                                   void* userData,
+                                   bool visualizeValidSegments) const
 {
     PROFILE_FUNCTION();
 
@@ -78,7 +84,7 @@ bool PathSimulator::isPathOccluded(const SoundPath& path,
             }
             else
             {
-                if (validationRayVisualization)
+                if (validationRayVisualization && visualizeValidSegments)
                 {
                     validationRayVisualization(probes[prev].influence.center,
                                                probes[current].influence.center, false, userData);
@@ -149,8 +155,6 @@ bool PathSimulator::findPaths(const Vector3f& source,
 {
     PROFILE_FUNCTION();
 
-    const int kMaxPaths = 64;
-
     int numPaths = 0;
     SoundPath paths[kMaxPaths];
     float pathWeights[kMaxPaths];
@@ -173,14 +177,14 @@ bool PathSimulator::findPaths(const Vector3f& source,
                 {
                     for (auto i = 0; i < sourceProbes.numProbes(); ++i)
                     {
-                        findPathsFromSourceProbe(scene, probes, sourceProbes, listenerProbes, bakedPathData, i, sourceProbes.weights[i],
+                        findPathsFromSourceProbe(source, listener, scene, probes, sourceProbes, listenerProbes, bakedPathData, i, sourceProbes.weights[i],
                                                  radius, threshold, visRange, enableValidation, findAlternatePaths, simplifyPaths, realTimeVis,
                                                  validationRayVisualization, userData, numPaths, paths, pathWeights, starts, ends);
                     }
                 }
                 else
                 {
-                    findPathsFromSourceProbe(scene, probes, sourceProbes, listenerProbes, bakedPathData, sourceProbes.findNearest(source), 1.0f,
+                    findPathsFromSourceProbe(source, listener, scene, probes, sourceProbes, listenerProbes, bakedPathData, sourceProbes.findNearest(source), 1.0f,
                                              radius, threshold, visRange, enableValidation, findAlternatePaths, simplifyPaths, realTimeVis,
                                              validationRayVisualization, userData, numPaths, paths, pathWeights, starts, ends);
                 }
@@ -196,6 +200,9 @@ bool PathSimulator::findPaths(const Vector3f& source,
         SoundPath directPath;
         directPath.direct = true;
 
+        mResolvedPaths[numPaths].bends.clear();
+        mResolvedPaths[numPaths].length = (source - listener).length();
+        mResolvedPaths[numPaths].direction = Vector3f::unitVector(source - listener);
         paths[numPaths] = directPath;
         pathWeights[numPaths] = 1.0f;
         starts[numPaths] = -1;
@@ -203,18 +210,20 @@ bool PathSimulator::findPaths(const Vector3f& source,
         ++numPaths;
     }
 
-    calcAmbisonicsCoeffsForPaths(source, listener, probes, starts, ends, numPaths, paths, pathWeights, order, distanceAttenuationModel, coeffs);
+    calcAmbisonicsCoeffsForPaths(numPaths, paths, pathWeights, order, distanceAttenuationModel, coeffs);
 
-    calcEQForPaths(probes, starts, ends, numPaths, paths, pathWeights, deviationModel, eqGains, totalDeviation);
+    calcEQForPaths(starts, ends, numPaths, paths, pathWeights, deviationModel, mResolvedPaths.data(), eqGains, totalDeviation);
 
-    calcAverageDirectionForPaths(source, listener, probes, starts, ends, numPaths, paths, pathWeights, avgDirection);
+    calcAverageDirectionForPaths(numPaths, paths, pathWeights, avgDirection);
 
-    calcDistanceRatioForPaths(source, probes, starts, ends, numPaths, paths, pathWeights, distanceRatio);
+    calcDistanceRatioForPaths(source, listener, numPaths, paths, pathWeights, distanceRatio);
 
     return true;
 }
 
-void PathSimulator::findPathsFromSourceProbe(const IScene& scene,
+void PathSimulator::findPathsFromSourceProbe(const Vector3f& source,
+                                             const Vector3f& listener,
+                                             const IScene& scene,
                                              const ProbeBatch& probes,
                                              const ProbeNeighborhood& sourceProbes,
                                              const ProbeNeighborhood& listenerProbes,
@@ -243,14 +252,16 @@ void PathSimulator::findPathsFromSourceProbe(const IScene& scene,
 
     for (auto i = 0; i < listenerProbes.numProbes(); ++i)
     {
-        findPathsFromSourceProbeToListenerProbe(scene, probes, listenerProbes, bakedPathData, sourceProbeIndex, sourceProbeWeight, i,
+        findPathsFromSourceProbeToListenerProbe(source, listener, scene, probes, listenerProbes, bakedPathData, sourceProbeIndex, sourceProbeWeight, i,
                                                 radius, threshold, visRange, enableValidation, findAlternatePaths,
                                                 simplifyPaths, realTimeVis, validationRayVisualization, userData,
                                                 numPaths, paths, pathWeights, starts, ends);
     }
 }
 
-void PathSimulator::findPathsFromSourceProbeToListenerProbe(const IScene& scene,
+void PathSimulator::findPathsFromSourceProbeToListenerProbe(const Vector3f& source,
+                                                            const Vector3f& listener,
+                                                            const IScene& scene,
                                                             const ProbeBatch& probes,
                                                             const ProbeNeighborhood& listenerProbes,
                                                             const BakedPathData& bakedPathData,
@@ -280,12 +291,14 @@ void PathSimulator::findPathsFromSourceProbeToListenerProbe(const IScene& scene,
     SoundPath soundPath;
     auto tryRealTime = false;
 
-    soundPath = bakedPathData.lookupShortestPath(sourceProbeIndex, listenerProbeIndex, nullptr);
+    mProbePath.reset();
+    soundPath = bakedPathData.lookupShortestPath(sourceProbeIndex, listenerProbeIndex, &mProbePath);
     if (soundPath.isValid())
     {
         if (isPathOccluded(soundPath, scene, probes, radius, threshold, sourceProbeIndex,
-            listenerProbeIndex, enableValidation, validationRayVisualization, userData))
+            listenerProbeIndex, enableValidation, validationRayVisualization, userData, false))
         {
+            soundPath = SoundPath(); // Discard the occluded path before trying an alternative.
             if (findAlternatePaths)
             {
                 tryRealTime = true;
@@ -295,16 +308,36 @@ void PathSimulator::findPathsFromSourceProbeToListenerProbe(const IScene& scene,
 
     if (tryRealTime)
     {
-        ProbePath probePath;
-        probePath = mPathFinder.findShortestPath(scene, probes, bakedPathData.visGraph(),
+        mProbePath = mPathFinder.findShortestPath(scene, probes, bakedPathData.visGraph(),
                                                  mVisTester, sourceProbeIndex, listenerProbeIndex, radius,
                                                  threshold, visRange, simplifyPaths, realTimeVis);
 
-        soundPath = SoundPath(probePath, probes);
+        soundPath = SoundPath(mProbePath, probes);
     }
 
-    if (soundPath.isValid())
+    if (soundPath.isValid() && mProbePath.valid && numPaths < kMaxPaths)
     {
+        // Include source and listener connections before simplifying the probe route.
+        mRoutePoints.clear();
+        auto append = [&](const Vector3f& point) {
+            if (mRoutePoints.empty() || (point - mRoutePoints.back()).length() > 1e-5f)
+                mRoutePoints.push_back(point);
+        };
+        append(source);
+        append(probes[sourceProbeIndex].influence.center);
+        for (auto node : mProbePath.nodes)
+            append(probes[node].influence.center);
+        append(probes[listenerProbeIndex].influence.center);
+        append(listener);
+
+        if (!mResolvedPaths[numPaths].resolve(mRoutePoints,
+                [&](const Vector3f& a, const Vector3f& b) { return scene.isOccluded(a, b); }))
+            return;
+        if (validationRayVisualization)
+        {
+            for (auto i = size_t{1}; i < mRoutePoints.size(); ++i)
+                validationRayVisualization(mRoutePoints[i - 1], mRoutePoints[i], false, userData);
+        }
         paths[numPaths] = soundPath;
         pathWeights[numPaths] = sourceProbeWeight * listenerProbes.weights[listenerProbeNeighborhoodIndex];
         starts[numPaths] = sourceProbeIndex;
@@ -352,24 +385,8 @@ SoundPath PathSimulator::findShortestPathFromSourceProbeToListenerProbe(const IS
     return soundPath;
 }
 
-void PathSimulator::calcDeviationTerm(float deviation,
-                                      const DeviationModel& deviationModel,
-                                      float* deviationTerm)
-{
-    for (auto i = 0; i < Bands::kNumBands; ++i)
-    {
-        deviationTerm[i] = deviationModel.evaluate(deviation, i);
-    }
-}
-
-// For any single SoundPath, we project the corresponding virtual source into Ambisonics and scale the resulting SH
-// coefficients by a distance attenuation factor. The SH coefficients for all paths are weighted and summed.
-void PathSimulator::calcAmbisonicsCoeffsForPaths(const Vector3f& source,
-                                                 const Vector3f& listener,
-                                                 const ProbeBatch& probes,
-                                                 int* starts,
-                                                 int* ends,
-                                                 int numPaths,
+// Project resolved arrival directions into Ambisonics, weighted by path weight and distance attenuation.
+void PathSimulator::calcAmbisonicsCoeffsForPaths(int numPaths,
                                                  const SoundPath* paths,
                                                  const float* weights,
                                                  int order,
@@ -388,36 +405,21 @@ void PathSimulator::calcAmbisonicsCoeffsForPaths(const Vector3f& source,
             if (!paths[i].isValid())
                 continue;
 
-            Vector3f virtualSource;
-            float distance;
-
-            if (starts[i] >= 0 && ends[i] >= 0)
-            {
-                virtualSource = paths[i].toVirtualSource(probes, starts[i], ends[i]);
-                distance = (virtualSource - probes[ends[i]].influence.center).length();
-            }
-            else
-            {
-                virtualSource = source;
-                distance = (virtualSource - listener).length();
-            }
-
-            auto distanceAttenuation = distanceAttenuationModel.evaluate(distance);
-            auto gain = weights[i] * distanceAttenuation;
-
-            auto direction = Vector3f::unitVector(virtualSource - listener);
+            const auto distanceAttenuation = distanceAttenuationModel.evaluate(mResolvedPaths[i].length);
+            const auto gain = weights[i] * distanceAttenuation;
+            const auto& direction = mResolvedPaths[i].direction;
             SphericalHarmonics::projectSinglePointAndUpdate(direction, order, gain, coeffs);
         }
     }
 }
 
-void PathSimulator::calcEQForPaths(const ProbeBatch& probes,
-                                   int* starts,
+void PathSimulator::calcEQForPaths(int* starts,
                                    int* ends,
                                    int numPaths,
                                    const SoundPath* paths,
                                    const float* weights,
                                    const DeviationModel& deviationModel,
+                                   const ResolvedPath* resolvedPaths,
                                    float* eqGains,
                                    float* totalDeviation)
 {
@@ -436,13 +438,10 @@ void PathSimulator::calcEQForPaths(const ProbeBatch& probes,
             if (starts[i] >= 0 && ends[i] >= 0)
             {
                 float deviationTerm[Bands::kNumBands];
-                calcDeviationTerm(std::max(1e-8f, paths[i].deviation(probes, starts[i], ends[i])), deviationModel, deviationTerm);
-
-                float deviationTermReference[Bands::kNumBands];
-                calcDeviationTerm(1e-8f, deviationModel, deviationTermReference);
                 for (auto j = 0; j < Bands::kNumBands; ++j)
                 {
-                    deviationTerm[j] /= deviationTermReference[j];
+                    deviationTerm[j] = deviationModel.evaluatePath(resolvedPaths[i].bends.data(),
+                        static_cast<int>(resolvedPaths[i].bends.size()), j);
                 }
 
                 auto overallGain = 1.0f;
@@ -484,19 +483,15 @@ void PathSimulator::calcEQForPaths(const ProbeBatch& probes,
 
             if (starts[i] >= 0 && ends[i] >= 0)
             {
-                *totalDeviation += weights[i] * paths[i].deviation(probes, starts[i], ends[i]);
+                for (auto bend : resolvedPaths[i].bends)
+                    *totalDeviation += weights[i] * bend;
             }
         }
     }
 }
 
 
-void PathSimulator::calcAverageDirectionForPaths(const Vector3f& source,
-                                                 const Vector3f& listener,
-                                                 const ProbeBatch& probes,
-                                                 int* starts,
-                                                 int* ends,
-                                                 int numPaths,
+void PathSimulator::calcAverageDirectionForPaths(int numPaths,
                                                  const SoundPath* paths,
                                                  const float* weights,
                                                  Vector3f* avgDirection)
@@ -512,23 +507,9 @@ void PathSimulator::calcAverageDirectionForPaths(const Vector3f& source,
         if (!paths[i].isValid())
             continue;
 
-        Vector3f virtualSource;
-        float distance;
-
-        if (starts[i] >= 0 && ends[i] >= 0)
-        {
-            virtualSource = paths[i].toVirtualSource(probes, starts[i], ends[i]);
-            distance = (virtualSource - probes[ends[i]].influence.center).length();
-        }
-        else
-        {
-            virtualSource = source;
-            distance = (virtualSource - listener).length();
-        }
-
-        auto distanceAttenuation = 1.0f / std::max(distance, 1.0f);
-        auto gain = weights[i] * distanceAttenuation;
-        auto pathDirection = Vector3f::unitVector(virtualSource - listener);
+        const auto distanceAttenuation = 1.0f / std::max(mResolvedPaths[i].length, 1.0f);
+        const auto gain = weights[i] * distanceAttenuation;
+        const auto& pathDirection = mResolvedPaths[i].direction;
 
         direction += (pathDirection * gain);
     }
@@ -537,9 +518,7 @@ void PathSimulator::calcAverageDirectionForPaths(const Vector3f& source,
 }
 
 void PathSimulator::calcDistanceRatioForPaths(const Vector3f& source,
-                                              const ProbeBatch& probes,
-                                              int* starts,
-                                              int* ends,
+                                              const Vector3f& listener,
                                               int numPaths,
                                               const SoundPath* paths,
                                               const float* weights,
@@ -556,15 +535,10 @@ void PathSimulator::calcDistanceRatioForPaths(const Vector3f& source,
         if (!paths[i].isValid())
             continue;
 
-        float pathRatio = 1.0;
-
-        if (starts[i] >= 0 && ends[i] >= 0)
-        {
-            Vector3f virtualSource = paths[i].toVirtualSource(probes, source, ends[i]);
-            float pathDistance = (virtualSource - probes[ends[i]].influence.center).length();
-            float directDistance = (source - probes[ends[i]].influence.center).length();
-            pathRatio = (pathDistance > 1.0f && directDistance > 1.0f) ? directDistance / pathDistance : 1.0f;
-        }
+        const auto pathDistance = mResolvedPaths[i].length;
+        const auto directDistance = (source - listener).length();
+        const auto pathRatio = (pathDistance > 1.0f && directDistance > 1.0f)
+            ? directDistance / pathDistance : 1.0f;
 
         ratio += weights[i] * pathRatio;
     }

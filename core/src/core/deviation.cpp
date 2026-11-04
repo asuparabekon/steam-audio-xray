@@ -51,7 +51,30 @@ float DeviationModel::evaluate(float angle, int band) const
     }
 }
 
-// The EQ coefficients for a given total deviation angle are calculated using UTD.
+float DeviationModel::evaluatePath(const float* bends, int count, int band) const
+{
+    const auto reference = isDefault() ? evaluate(1e-8f, band) : 1.0f;
+    if (!Math::isFinite(reference) || reference <= 0.0f)
+        return 0.0f;
+    auto gain = 1.0f;
+    auto total = 0.0f;
+    for (auto i = 0; i < count; ++i)
+    {
+        if (!Math::isFinite(bends[i]) || bends[i] < 0.0f || bends[i] > Math::kPi)
+            return 0.0f;
+        total += bends[i];
+        if (isDefault())
+        {
+            const auto loss = evaluate(std::max(1e-8f, bends[i]), band) / reference;
+            gain *= std::max(0.0f, std::min(1.0f, loss));
+        }
+    }
+    if (!isDefault())
+        gain = evaluate(total, band);
+    return Math::isFinite(gain) ? gain : 0.0f;
+}
+
+// UTD attenuation for a bend angle in [0, pi].
 // See http://www-sop.inria.fr/reves/Nicolas.Tsingos/publis/sig2001.pdf.
 float DeviationModel::utdDeviation(float angle, int band)
 {

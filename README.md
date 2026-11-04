@@ -16,3 +16,7 @@ Steam Audio supports Unity 2017.3+, Unreal Engine 4.27+, FMOD Studio 2.0+, and W
 - [Downloads & Documentation](https://valvesoftware.github.io/steam-audio/downloads.html)
 - [Community Forum](http://steamcommunity.com/app/596420/discussions/)
 - [News & Updates](http://steamcommunity.com/app/596420/allnews/)
+
+## X-Ray integration
+
+See [xray/README.md](xray/README.md) for the pathing changes, SSE fix and tests.

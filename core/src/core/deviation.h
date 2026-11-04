@@ -37,6 +37,9 @@ public:
 
     float evaluate(float angle, int band) const;
 
+    // Multiply the default loss for each bend. Custom callbacks receive the total angle.
+    float evaluatePath(const float* bends, int count, int band) const;
+
 private:
     DeviationCallback mCallback;
     void* mUserData;

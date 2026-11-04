@@ -20,6 +20,8 @@
 #include "probe_manager.h"
 #include "distance_attenuation.h"
 #include "deviation.h"
+#include "resolved_path.h"
+#include <array>
 
 namespace ipl {
 
@@ -80,8 +82,15 @@ public:
 private:
     ProbeVisibilityTester mVisTester; // A visibility tester.
     PathFinder mPathFinder; // A path finder, used to find alternate paths at run-time if needed.
+    static constexpr int kMaxPaths = 64;
+    // Reuse route storage between simulation updates.
+    std::array<ResolvedPath, kMaxPaths> mResolvedPaths;
+    ProbePath mProbePath;
+    vector<Vector3f> mRoutePoints;
 
-    void findPathsFromSourceProbe(const IScene& scene,
+    void findPathsFromSourceProbe(const Vector3f& source,
+                                  const Vector3f& listener,
+                                  const IScene& scene,
                                   const ProbeBatch& probes,
                                   const ProbeNeighborhood& sourceProbes,
                                   const ProbeNeighborhood& listenerProbes,
@@ -103,7 +112,9 @@ private:
                                   int* starts,
                                   int* ends);
 
-    void findPathsFromSourceProbeToListenerProbe(const IScene& scene,
+    void findPathsFromSourceProbeToListenerProbe(const Vector3f& source,
+                                                 const Vector3f& listener,
+                                                 const IScene& scene,
                                                  const ProbeBatch& probes,
                                                  const ProbeNeighborhood& listenerProbes,
                                                  const BakedPathData& bakedPathData,
@@ -134,61 +145,46 @@ private:
                         int end,
                         bool enableValidation,
                         ValidationRayVisualizationCallback validationRayVisualization,
-                        void* userData) const;
+                        void* userData,
+                        bool visualizeValidSegments = true) const;
 
     // Given a set of SoundPaths describing multiple paths that reach the listener, and corresponding weights,
     // calculates the SH coefficients describing the total sound field.
-    static void calcAmbisonicsCoeffsForPaths(const Vector3f& source,
-                                             const Vector3f& listener,
-                                             const ProbeBatch& probes,
-                                             int* starts,
-                                             int* ends,
-                                             int numPaths,
-                                             const SoundPath* paths,
-                                             const float* weights,
-                                             int order,
-                                             const DistanceAttenuationModel& distanceAttenuationModel,
-                                             float* coeffs);
+    void calcAmbisonicsCoeffsForPaths(int numPaths,
+                                      const SoundPath* paths,
+                                      const float* weights,
+                                      int order,
+                                      const DistanceAttenuationModel& distanceAttenuationModel,
+                                      float* coeffs);
 
     // Given a set of SoundPaths describing multiple paths that reach the listener, and corresponding weights,
     // calculates weighted EQ and total deviation of the paths.
-    static void calcEQForPaths(const ProbeBatch& probes,
-                               int* starts,
+    static void calcEQForPaths(int* starts,
                                int* ends,
                                int numPaths,
                                const SoundPath* paths,
                                const float* weights,
                                const DeviationModel& deviationModel,
+                               const ResolvedPath* resolvedPaths,
                                float* eqGains,
                                float* totalDeviation);
 
     // Given a set of SoundPaths describing multiple paths that reach the listener, and corresponding weights,
     // calculates average direction of the paths.
-    static void calcAverageDirectionForPaths(const Vector3f& source,
-                                             const Vector3f& listener,
-                                             const ProbeBatch& probes,
-                                             int* starts,
-                                             int* ends,
-                                             int numPaths,
-                                             const SoundPath* paths,
-                                             const float* weights,
-                                             Vector3f* avgDirection);
+    void calcAverageDirectionForPaths(int numPaths,
+                                      const SoundPath* paths,
+                                      const float* weights,
+                                      Vector3f* avgDirection);
 
     // Given a set of SoundPaths describing multiple paths that reach the listener, and corresponding weights,
     // calculates average ratio between direct path and pathing path.
-    static void calcDistanceRatioForPaths(const Vector3f& source,
-                                          const ProbeBatch& probes,
-                                          int* starts,
-                                          int* ends,
-                                          int numPaths,
-                                          const SoundPath* paths,
-                                          const float* weights,
-                                          float* avgDistanceRatio);
+    void calcDistanceRatioForPaths(const Vector3f& source,
+                                   const Vector3f& listener,
+                                   int numPaths,
+                                   const SoundPath* paths,
+                                   const float* weights,
+                                   float* avgDistanceRatio);
 
-    // Calculates EQ coefficients corresponding to a given total deviation angle.
-    static void calcDeviationTerm(float deviation,
-                                  const DeviationModel& deviationModel,
-                                  float* deviationTerm);
 };
 
 }
